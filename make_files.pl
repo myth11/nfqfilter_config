@@ -44,7 +44,7 @@ my $ssls_file = $Config->{'APP.ssls'} || "";
 my $hosts_file = $Config->{'APP.hosts'} || "";
 my $protos_file = $Config->{'APP.protocols'} || "";
 my $ssls_ips_file = $Config->{'APP.ssls_ips'} || "";
-my $domains_ssl = $Config->{'APP.domains_ssl'} || "false";
+my $domains_ssl = $Config->{'APP.domains_ssl'} || "true";
 $domains_ssl = lc($domains_ssl);
 my $only_original_ssl_ip = $Config->{'APP.only_original_ssl_ip'} || "false";
 $only_original_ssl_ip = lc($only_original_ssl_ip);
@@ -119,9 +119,32 @@ my %https_add_ports;
 
 my %ssl_hosts;
 my %ssl_ip;
+
+my $n_masked_domains = 0;
+my %masked_domains;
 my %domains;
 
-my $sth = $dbh->prepare("SELECT * FROM zap2_domains");
+my $sth = $dbh->prepare("SELECT * FROM zap2_domains WHERE domain like '*.%'");
+$sth->execute();
+while (my $ips = $sth->fetchrow_hashref())
+{
+	my $dm = $ips->{domain};
+	$dm =~ s/\*\.//g;
+	my $domain_canonical=new URI("http://".$dm)->canonical();
+	$domain_canonical =~ s/^http\:\/\///;
+	$domain_canonical =~ s/\/$//;
+	$domain_canonical =~ s/\.$//;
+	$masked_domains{$domain_canonical} = 1;
+	$n_masked_domains++;
+	print $DOMAINS_FILE "*.",$domain_canonical,"\n";
+	if($domains_ssl eq "true")
+	{
+		print $SSL_HOST_FILE "*.",$domain_canonical,"\n";
+	}
+}
+$sth->finish();
+
+$sth = $dbh->prepare("SELECT * FROM zap2_domains WHERE domain not like '*.%'");
 $sth->execute;
 while (my $ips = $sth->fetchrow_hashref())
 {
@@ -130,11 +153,19 @@ while (my $ips = $sth->fetchrow_hashref())
 	$domain_canonical =~ s/^http\:\/\///;
 	$domain_canonical =~ s/\/$//;
 	$domain_canonical =~ s/\.$//;
-	if(defined $domains{$domain_canonical})
+	my $skip = 0;
+	foreach my $dm (keys %masked_domains)
 	{
-		$logger->warn("Domain $domain_canonical already present in the domains list");
-		next;
+		if($domain_canonical =~ /\.$dm$/)
+		{
+#			print "found mask $dm for domain $domain\n";
+                	$logger->debug("found mask *.$dm for domain $domain\n");
+			$skip++;
+			last;
+		}
 	}
+	next if($skip);
+
 	$domains{$domain_canonical}=1;
 	$logger->debug("Canonical domain: $domain_canonical");
 	print $DOMAINS_FILE $domain_canonical."\n";
@@ -142,7 +173,7 @@ while (my $ips = $sth->fetchrow_hashref())
 	{
 		next if(defined $ssl_hosts{$domain_canonical});
 		$ssl_hosts{$domain_canonical}=1;
-		print $SSL_HOST_FILE "$domain_canonical\n";
+		print $SSL_HOST_FILE (length($domain_canonical) > 47 ? (substr($domain_canonical,0,47)."\n"): "$domain_canonical\n");
 		my @ssl_ips=get_ips_for_record_id($ips->{record_id});
 		foreach my $ip (@ssl_ips)
 		{
@@ -182,11 +213,14 @@ while (my $ips = $sth->fetchrow_hashref())
 	my $port=$url1->port();
 
 	$host =~ s/\.$//;
-	if(defined $domains{$host})
+
+	my @ipp=split(/\:/,$url2);
+	if(defined $domains{$host} & (scalar(@ipp) != "3"))
 	{
 		$logger->warn("Host '$host' from url '$url2' present in the domains");
 		next;
 	}
+
 	if($scheme eq 'https')
 	{
 		next if(defined $ssl_hosts{$host});
@@ -220,7 +254,7 @@ while (my $ips = $sth->fetchrow_hashref())
 
 	my $host_end=index($url2,'/',7);
 	my $need_add_dot=0;
-	$need_add_dot=1 if(substr($url2, $host_end-1 , 1) eq ".");
+#	$need_add_dot=1 if(substr($url2, $host_end-1 , 1) eq ".");
 
 	# убираем любое упоминание о фрагменте... оно не нужно
 	$url11 =~ s/^(.*)\#(.*)$/$1/g;
@@ -388,30 +422,36 @@ my $net_file_hash=get_md5_sum($bgpd_file);
 
 if(!$update_soft_quagga)
 {
-	if($net_file_hash ne $net_file_hash_old)
-	{
-		$logger->debug("Restarting bgpd...");
-		system("/bin/systemctl", "restart","bgpd");
-		if ( $? == -1 )
-		{
-			$logger->error("Bgpd restart failed: $!");
-		} else {
-			$logger->info("Bgpd successfully restarted!");
-		}
-	}
+        if($net_file_hash ne $net_file_hash_old)
+        {
+                $logger->debug("Restarting bgpd...");
+                system("/bin/systemctl", "restart","bgpd");
+                if ( $? == -1 )
+                {
+                        $logger->error("Bgpd restart failed: $!");
+                } else {
+                        $logger->info("Bgpd successfully restarted!");
+                }
+        }
 }
 
 if($domains_file_hash ne $domains_file_hash_old || $urls_file_hash ne $urls_file_hash_old || $ssl_host_file_hash ne $ssl_host_file_hash_old)
 {
-	$logger->debug("Restarting nfqfilter...");
-	system("/bin/systemctl", "restart","nfqfilter");
-	if ( $? == -1 )
-	{
-		$logger->error("Nfqfilter restart failed: $!");
-	} else {
-		$logger->info("Nfqfilter successfully restarted!");
-	}
+        $logger->debug("Restarting nfqfilter...");
+
+        system("/sbin/iptables -A FORWARD -s 192.168.30.4 -j DROP");
+        sleep 3;
+        system("/bin/systemctl", "restart","nfqfilter");
+        sleep 10;
+        system("/sbin/iptables -D FORWARD -s 192.168.30.4 -j DROP");
+        if ( $? == -1 )
+        {
+                $logger->error("Nfqfilter restart failed: $!");
+        } else {
+                $logger->info("Nfqfilter successfully restarted!");
+        }
 }
+
 
 sub get_md5_sum
 {
