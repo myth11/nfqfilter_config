@@ -124,7 +124,17 @@ my $n_masked_domains = 0;
 my %masked_domains;
 my %domains;
 
-my $sth = $dbh->prepare("SELECT * FROM zap2_domains WHERE domain like '*.%'");
+my $sth = $dbh->prepare("SELECT * FROM zap2_ex_domains WHERE domain like '*.%'");
+$sth->execute();
+while (my $ips = $sth->fetchrow_hashref())
+{
+	my $dm = $ips->{domain};
+	$dm =~ s/\*\.//g;
+	$masked_domains{$dm} = 1;
+}
+$sth->finish();
+
+$sth = $dbh->prepare("SELECT * FROM zap2_domains WHERE domain like '*.%'");
 $sth->execute();
 while (my $ips = $sth->fetchrow_hashref())
 {
