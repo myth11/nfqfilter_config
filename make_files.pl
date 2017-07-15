@@ -166,7 +166,7 @@ while (my $ips = $sth->fetchrow_hashref())
 	my $skip = 0;
 	foreach my $dm (keys %masked_domains)
 	{
-		if($domain_canonical =~ /\.$dm$/)
+		if($domain_canonical =~ /\.\Q$dm\E$/ || $domain_canonical =~ /^\Q$dm\E$/)
 		{
 #			print "found mask $dm for domain $domain\n";
                 	$logger->debug("found mask *.$dm for domain $domain\n");
@@ -223,6 +223,17 @@ while (my $ips = $sth->fetchrow_hashref())
 	my $port=$url1->port();
 
 	$host =~ s/\.$//;
+
+	my $skip = 0;
+	foreach my $dm (keys %masked_domains)
+	{
+		if($host =~ /\.\Q$dm\E$/ || $host =~ /^\Q$dm\E$/)
+		{
+#			print "found mask $dm for domain $host\n";
+			$skip++;
+			last;
+		}
+}
 
 	my @ipp=split(/\:/,$url2);
 	if(defined $domains{$host} & (scalar(@ipp) != "3"))
